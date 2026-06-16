@@ -18,7 +18,8 @@ import {
   X,
   CheckCircle2,
   AlertCircle,
-  Loader2
+  Loader2,
+  Trash2
 } from 'lucide-react';
 import {
   Chart as ChartJS,
@@ -32,7 +33,7 @@ import {
   LineElement,
   Filler
 } from 'chart.js';
-import { Bar, Line } from 'react-chartjs-2';
+import { Bar } from 'react-chartjs-2';
 import './App.css';
 
 ChartJS.register(
@@ -58,6 +59,15 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [notification, setNotification] = useState<{msg: string, type: 'success' | 'error'} | null>(null);
+
+  // Novos estados adicionados
+  const [clients, setClients] = useState<any[]>([]);
+  const [showClientModal, setShowClientModal] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<any | null>(null);
+  const [cart, setCart] = useState<any[]>([]);
+  const [selectedClient, setSelectedClient] = useState<number>(1);
+  const [selectedProduct, setSelectedProduct] = useState<number>(0);
+  const [saleQuantity, setSaleQuantity] = useState<number>(1);
 
   const notify = (msg: string, type: 'success' | 'error' = 'success') => {
     setNotification({ msg, type });
@@ -94,14 +104,32 @@ function App() {
     }
   }, []);
 
+  const fetchClients = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/clients`);
+      const data = await res.json();
+      setClients(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error('Erro ao carregar clientes.');
+    }
+  }, []);
+
   useEffect(() => {
     const loadAll = async () => {
       setLoading(true);
-      await Promise.all([fetchProducts(), fetchCategories(), fetchDashboard()]);
+      await Promise.all([fetchProducts(), fetchCategories(), fetchDashboard(), fetchClients()]);
       setLoading(false);
     };
     loadAll();
-  }, [fetchProducts, fetchCategories, fetchDashboard]);
+  }, [fetchProducts, fetchCategories, fetchDashboard, fetchClients]);
+
+  // Seta o primeiro produto disponível como padrão
+  useEffect(() => {
+    if (products.length > 0 && selectedProduct === 0) {
+      const firstAvailable = products.find(p => p.estoque > 0);
+      if (firstAvailable) setSelectedProduct(firstAvailable.id);
+    }
+  }, [products, selectedProduct]);
 
   const handleAddProduct = async (e: any) => {
     e.preventDefault();
@@ -110,7 +138,8 @@ function App() {
       nome: formData.get('nome'),
       preco: Number(formData.get('preco')),
       estoque: Number(formData.get('estoque')),
-      categoria_id: Number(formData.get('categoria_id'))
+      categoria_id: Number(formData.get('categoria_id')),
+      descricao: formData.get('descricao')
     };
 
     try {
@@ -129,12 +158,101 @@ function App() {
     }
   };
 
-  const handleProcessSale = async (e: any) => {
+  const handleEditProduct = async (e: any) => {
     e.preventDefault();
     const formData = new FormData(e.target);
+    const updatedProduct = {
+      preco: Number(formData.get('preco')),
+      estoque: Number(formData.get('estoque')),
+      descricao: formData.get('descricao')
+    };
+
+    try {
+      const res = await fetch(`${API_URL}/products/${editingProduct.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedProduct)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      notify(data.message);
+      setEditingProduct(null);
+      await Promise.all([fetchProducts(), fetchDashboard()]);
+    } catch (err: any) {
+      notify(err.message, 'error');
+    }
+  };
+
+  const handleAddClient = async (e: any) => {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const newClient = {
+      nome: formData.get('nome'),
+      endereco: formData.get('endereco'),
+      telefone: formData.get('telefone'),
+      cpf: formData.get('cpf')
+    };
+
+    try {
+      const res = await fetch(`${API_URL}/clients`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newClient)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      notify(data.message);
+      setShowClientModal(false);
+      await fetchClients();
+    } catch (err: any) {
+      notify(err.message, 'error');
+    }
+  };
+
+  const addToCart = () => {
+    const prod = products.find(p => p.id === Number(selectedProduct));
+    if (!prod) {
+      notify('Selecione um produto válido.', 'error');
+      return;
+    }
+    if (saleQuantity <= 0) {
+      notify('A quantidade deve ser maior que zero.', 'error');
+      return;
+    }
+    
+    const existingCartItem = cart.find(item => item.id === prod.id);
+    const totalQty = (existingCartItem?.quantity || 0) + saleQuantity;
+    
+    if (totalQty > prod.estoque) {
+      notify(`Estoque insuficiente. Disponível: ${prod.estoque}`, 'error');
+      return;
+    }
+
+    if (existingCartItem) {
+      setCart(cart.map(item => item.id === prod.id ? { ...item, quantity: totalQty } : item));
+    } else {
+      setCart([...cart, { ...prod, quantity: saleQuantity }]);
+    }
+    notify(`Adicionado: ${prod.nome} (Qtd: ${saleQuantity})`);
+  };
+
+  const removeFromCart = (id: number) => {
+    setCart(cart.filter(item => item.id !== id));
+  };
+
+  const handleProcessSale = async (e: any) => {
+    e.preventDefault();
+    if (cart.length === 0) {
+      notify('O carrinho está vazio. Adicione produtos antes de finalizar.', 'error');
+      return;
+    }
+
     const saleData = {
-      productId: Number(formData.get('productId')),
-      quantity: Number(formData.get('quantity'))
+      clienteId: selectedClient,
+      items: cart.map(item => ({
+        productId: item.id,
+        quantity: item.quantity
+      }))
     };
 
     try {
@@ -146,6 +264,7 @@ function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
       notify(data.message);
+      setCart([]);
       await Promise.all([fetchProducts(), fetchDashboard()]);
       setActiveTab('dashboard');
     } catch (err: any) {
@@ -169,18 +288,7 @@ function App() {
     };
   }, [products]);
 
-  const lineData = {
-    labels: ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sab', 'Dom'],
-    datasets: [{
-      label: 'Vendas',
-      data: [31, 40, 28, 51, 42, 109, 100],
-      fill: true,
-      borderColor: '#6366f1',
-      backgroundColor: 'rgba(99, 102, 241, 0.1)',
-      tension: 0.4,
-      pointRadius: 4,
-    }]
-  };
+
 
   if (loading) {
     return (
@@ -213,8 +321,8 @@ function App() {
           <NavItem active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={<LayoutDashboard size={20} />} label="Dashboard" expanded={isSidebarOpen} />
           <NavItem active={activeTab === 'produtos'} onClick={() => setActiveTab('produtos')} icon={<Package size={20} />} label="Produtos" expanded={isSidebarOpen} />
           <NavItem active={activeTab === 'vendas'} onClick={() => setActiveTab('vendas')} icon={<ShoppingCart size={20} />} label="Vendas" expanded={isSidebarOpen} />
+          <NavItem active={activeTab === 'clientes'} onClick={() => setActiveTab('clientes')} icon={<Users size={20} />} label="Clientes" expanded={isSidebarOpen} />
           <div className="nav-divider" />
-          <NavItem icon={<Users size={20} />} label="Equipe" expanded={isSidebarOpen} />
           <NavItem icon={<Settings size={20} />} label="Configurações" expanded={isSidebarOpen} />
         </nav>
 
@@ -293,7 +401,15 @@ function App() {
                   <tbody>
                     {products.map(p => (
                       <tr key={p.id}>
-                        <td><div className="product-cell"><div className="product-img">{p.nome[0]}</div><span>{p.nome}</span></div></td>
+                        <td>
+                          <div className="product-cell">
+                            <div className="product-img">{p.nome[0]}</div>
+                            <div style={{ display: 'flex', flexDirection: 'column' }}>
+                              <span style={{ fontWeight: 600 }}>{p.nome}</span>
+                              {p.descricao && <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{p.descricao}</span>}
+                            </div>
+                          </div>
+                        </td>
                         <td><span className="badge-cat">{p.categoria_nome || 'Geral'}</span></td>
                         <td>R$ {Number(p.preco).toLocaleString()}</td>
                         <td>
@@ -302,7 +418,15 @@ function App() {
                             <span>{p.estoque} un</span>
                           </div>
                         </td>
-                        <td><button className="icon-btn"><Settings size={16} /></button></td>
+                        <td>
+                          <button 
+                            className="icon-btn" 
+                            onClick={() => setEditingProduct(p)} 
+                            title="Editar Produto"
+                          >
+                            <Settings size={16} />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -315,26 +439,150 @@ function App() {
         {activeTab === 'vendas' && (
            <div className="view-container fade-in">
               <div className="view-header"><h1>Terminal de Vendas</h1></div>
-              <div className="sales-terminal">
-                 <div className="form-card">
-                    <h3>Registrar Pedido</h3>
-                    <form className="modern-form" onSubmit={handleProcessSale}>
+              
+              <div className="sales-grid-container">
+                 {/* Formulário de Adicionar ao Carrinho */}
+                 <div className="cart-card" style={{ padding: '1.5rem' }}>
+                    <h3 style={{ marginBottom: '1.25rem' }}>Adicionar ao Carrinho</h3>
+                    <div className="modern-form" style={{ padding: 0 }}>
                        <div className="field">
-                          <label>Produto (Postgres)</label>
-                          <select name="productId" required>
-                             {products.map(p => (
-                               <option key={p.id} value={p.id} disabled={p.estoque === 0}>
-                                 {p.nome} ({p.estoque} un)
+                          <label>Cliente (Postgres)</label>
+                          <select 
+                             value={selectedClient} 
+                             onChange={(e) => setSelectedClient(Number(e.target.value))}
+                             required
+                          >
+                             {clients.map(c => (
+                               <option key={c.id} value={c.id}>
+                                 {c.nome} {c.cpf ? `(CPF: ${c.cpf})` : ''}
                                </option>
                              ))}
                           </select>
                        </div>
-                       <div className="field">
-                          <label>Quantidade</label>
-                          <input name="quantity" type="number" defaultValue="1" min="1" required />
+                       
+                       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                          <div className="field">
+                             <label>Produto</label>
+                             <select 
+                                value={selectedProduct} 
+                                onChange={(e) => setSelectedProduct(Number(e.target.value))}
+                             >
+                                <option value="0" disabled>Selecione um produto</option>
+                                {products.map(p => (
+                                  <option key={p.id} value={p.id} disabled={p.estoque === 0}>
+                                    {p.nome} (Estoque: {p.estoque} un) - R$ {Number(p.preco).toFixed(2)}
+                                  </option>
+                                ))}
+                             </select>
+                          </div>
+                          <div className="field">
+                             <label>Quantidade</label>
+                             <input 
+                                type="number" 
+                                value={saleQuantity} 
+                                onChange={(e) => setSaleQuantity(Math.max(1, Number(e.target.value)))}
+                                min="1" 
+                             />
+                          </div>
                        </div>
-                       <button type="submit" className="btn-primary-new full">Confirmar e Abater Estoque</button>
-                    </form>
+                       
+                       <button type="button" className="btn-add-item" onClick={addToCart}>
+                          <Plus size={16} /> Adicionar Item
+                       </button>
+                    </div>
+                 </div>
+
+                 {/* Carrinho de Compras */}
+                 <div className="cart-card">
+                    <h3 style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                       <span>Carrinho de Vendas</span>
+                       <span className="badge-pill-client">
+                          {clients.find(c => c.id === selectedClient)?.nome || 'Consumidor Final'}
+                       </span>
+                    </h3>
+                    
+                    {cart.length === 0 ? (
+                       <div className="empty-cart-state">
+                          <ShoppingCart size={40} style={{ opacity: 0.5 }} />
+                          <p>O carrinho está vazio</p>
+                       </div>
+                    ) : (
+                       <>
+                          <div className="cart-items-list">
+                             {cart.map((item) => (
+                                <div className="cart-item" key={item.id}>
+                                   <div className="cart-item-info">
+                                      <span className="cart-item-name">{item.nome}</span>
+                                      <span className="cart-item-meta">
+                                         {item.quantity} un x R$ {Number(item.preco).toFixed(2)}
+                                      </span>
+                                   </div>
+                                   <div className="cart-item-actions">
+                                      <span className="cart-item-price">
+                                         R$ {(Number(item.preco) * item.quantity).toFixed(2)}
+                                      </span>
+                                      <button className="btn-remove-cart" onClick={() => removeFromCart(item.id)}>
+                                         <Trash2 size={16} />
+                                      </button>
+                                   </div>
+                                </div>
+                             ))}
+                          </div>
+                          
+                          <div className="cart-summary">
+                             <div className="cart-total-row">
+                                <span>Total Geral</span>
+                                <span>
+                                   R$ {cart.reduce((sum, item) => sum + (Number(item.preco) * item.quantity), 0).toFixed(2)}
+                                </span>
+                             </div>
+                             <button onClick={handleProcessSale} className="btn-primary-new full">
+                                Finalizar Venda e Abater Estoque
+                             </button>
+                          </div>
+                       </>
+                    )}
+                 </div>
+              </div>
+           </div>
+        )}
+
+        {activeTab === 'clientes' && (
+           <div className="view-container fade-in">
+              <div className="view-header">
+                 <div>
+                    <h1>Cadastro de Clientes</h1>
+                    <p>Gerencie a base de clientes do PostgreSQL.</p>
+                 </div>
+                 <button className="btn-primary-new" onClick={() => setShowClientModal(true)}>
+                    <Plus size={18} /> Novo Cliente
+                 </button>
+              </div>
+              
+              <div className="inventory-grid-v2">
+                 <div className="table-card full-width">
+                    <table className="custom-table">
+                       <thead>
+                          <tr>
+                             <th>ID</th>
+                             <th>Nome</th>
+                             <th>CPF</th>
+                             <th>Telefone</th>
+                             <th>Endereço</th>
+                          </tr>
+                       </thead>
+                       <tbody>
+                          {clients.map(c => (
+                             <tr key={c.id}>
+                                <td>#{c.id}</td>
+                                <td><strong>{c.nome}</strong></td>
+                                <td>{c.cpf || <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>}</td>
+                                <td>{c.telefone || <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>}</td>
+                                <td>{c.endereco || <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>-</span>}</td>
+                             </tr>
+                          ))}
+                       </tbody>
+                    </table>
                  </div>
               </div>
            </div>
@@ -371,9 +619,97 @@ function App() {
                 <label>Estoque Inicial</label>
                 <input name="estoque" type="number" required placeholder="Qtd" />
               </div>
+              <div className="field">
+                <label>Descrição do Produto</label>
+                <textarea 
+                  name="descricao" 
+                  className="field input textarea-field" 
+                  placeholder="Escreva detalhes sobre o produto..."
+                />
+              </div>
               <div className="modal-footer">
                 <button type="button" className="btn-text" onClick={() => setShowModal(false)}>Cancelar</button>
                 <button type="submit" className="btn-primary-new">Salvar no PostgreSQL</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showClientModal && (
+        <div className="modal-overlay">
+          <div className="modal-content scale-up">
+            <div className="modal-header">
+              <h2>Novo Cliente</h2>
+              <button onClick={() => setShowClientModal(false)}><X size={20} /></button>
+            </div>
+            <form onSubmit={handleAddClient} className="modern-form">
+              <div className="field">
+                <label>Nome Completo</label>
+                <input name="nome" required placeholder="Ex: Maria Oliveira" />
+              </div>
+              <div className="field">
+                <label>CPF</label>
+                <input name="cpf" placeholder="Ex: 000.000.000-00" maxLength={14} />
+              </div>
+              <div className="field">
+                <label>Telefone</label>
+                <input name="telefone" placeholder="Ex: (63) 99999-9999" />
+              </div>
+              <div className="field">
+                <label>Endereço Completo</label>
+                <input name="endereco" placeholder="Ex: Av. JK, Quadra 104, Palmas - TO" />
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn-text" onClick={() => setShowClientModal(false)}>Cancelar</button>
+                <button type="submit" className="btn-primary-new">Salvar no PostgreSQL</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {editingProduct && (
+        <div className="modal-overlay">
+          <div className="modal-content scale-up">
+            <div className="modal-header">
+              <h2>Editar Produto: {editingProduct.nome}</h2>
+              <button onClick={() => setEditingProduct(null)}><X size={20} /></button>
+            </div>
+            <form onSubmit={handleEditProduct} className="modern-form">
+              <div className="row">
+                <div className="field">
+                  <label>Preço de Venda (R$)</label>
+                  <input 
+                    name="preco" 
+                    type="number" 
+                    step="0.01" 
+                    required 
+                    defaultValue={editingProduct.preco} 
+                  />
+                </div>
+                <div className="field">
+                  <label>Quantidade em Estoque</label>
+                  <input 
+                    name="estoque" 
+                    type="number" 
+                    required 
+                    defaultValue={editingProduct.estoque} 
+                  />
+                </div>
+              </div>
+              <div className="field">
+                <label>Descrição do Produto</label>
+                <textarea 
+                  name="descricao" 
+                  className="field input textarea-field" 
+                  defaultValue={editingProduct.descricao || ''} 
+                  placeholder="Escreva detalhes sobre o produto..."
+                />
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn-text" onClick={() => setEditingProduct(null)}>Cancelar</button>
+                <button type="submit" className="btn-primary-new">Atualizar no PostgreSQL</button>
               </div>
             </form>
           </div>
@@ -383,7 +719,7 @@ function App() {
   );
 }
 
-const chartOptions = {
+const chartOptions: any = {
   plugins: { legend: { display: false } },
   scales: {
     x: { grid: { display: false } },

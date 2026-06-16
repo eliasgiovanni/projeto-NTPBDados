@@ -74,43 +74,136 @@ app.get('/api/dashboard/stats', async (req, res) => {
   }
 });
 
-// 4. Registrar Venda
+// 4. Registrar Venda (com suporte a múltiplos itens e cliente)
 app.post('/api/sales', async (req, res) => {
-  const { productId, quantity } = req.body;
-  const client = await pool.connect();
+  const { clienteId, productId, quantity, items } = req.body;
+  const targetClienteId = clienteId ? Number(clienteId) : 1;
+
+  // Normaliza os itens de venda para suportar tanto o formato legado quanto o novo
+  let saleItems: { productId: number; quantity: number }[] = [];
+  if (items && Array.isArray(items) && items.length > 0) {
+    saleItems = items.map(item => ({
+      productId: Number(item.productId),
+      quantity: Number(item.quantity)
+    }));
+  } else if (productId && quantity) {
+    saleItems = [{ productId: Number(productId), quantity: Number(quantity) }];
+  } else {
+    return res.status(400).json({ error: 'Nenhum item informado para a venda.' });
+  }
+
+  const dbClient = await pool.connect();
   try {
-    await client.query('BEGIN');
-    const productRes = await client.query('SELECT preco, estoque FROM produtos WHERE id = $1', [productId]);
-    if (productRes.rows.length === 0) throw new Error('Produto não encontrado.');
-    const { preco, estoque } = productRes.rows[0];
-    if (estoque < quantity) throw new Error('Estoque insuficiente no banco.');
-    const totalVenda = preco * quantity;
-    const vendaRes = await client.query('INSERT INTO vendas (total_venda) VALUES ($1) RETURNING id', [totalVenda]);
+    await dbClient.query('BEGIN');
+    
+    let totalVenda = 0;
+    const processedItems = [];
+    
+    // Validar estoque e calcular preços
+    for (const item of saleItems) {
+      const productRes = await dbClient.query('SELECT preco, estoque, nome FROM produtos WHERE id = $1', [item.productId]);
+      if (productRes.rows.length === 0) {
+        throw new Error(`Produto ID ${item.productId} não encontrado.`);
+      }
+      const { preco, estoque, nome } = productRes.rows[0];
+      if (estoque < item.quantity) {
+        throw new Error(`Estoque insuficiente para o produto "${nome}" (Estoque: ${estoque}, Solicitado: ${item.quantity}).`);
+      }
+      const totalItem = Number(preco) * Number(item.quantity);
+      totalVenda += totalItem;
+      processedItems.push({
+        productId: item.productId,
+        quantity: item.quantity,
+        precoUnitario: preco
+      });
+    }
+    
+    // Registrar a venda principal vinculando o cliente
+    const vendaRes = await dbClient.query(
+      'INSERT INTO vendas (total_venda, cliente_id) VALUES ($1, $2) RETURNING id',
+      [totalVenda, targetClienteId]
+    );
     const vendaId = vendaRes.rows[0].id;
-    await client.query('INSERT INTO itens_venda (venda_id, produto_id, quantidade, preco_unitario) VALUES ($1, $2, $3, $4)', [vendaId, productId, quantity, preco]);
-    await client.query('UPDATE produtos SET estoque = estoque - $1, sales = sales + $1 WHERE id = $2', [quantity, productId]);
-    await client.query('COMMIT');
+    
+    // Registrar os itens e dar baixa no estoque dos produtos
+    for (const item of processedItems) {
+      await dbClient.query(
+        'INSERT INTO itens_venda (venda_id, produto_id, quantidade, preco_unitario) VALUES ($1, $2, $3, $4)',
+        [vendaId, item.productId, item.quantity, item.precoUnitario]
+      );
+      await dbClient.query(
+        'UPDATE produtos SET estoque = estoque - $1, sales = sales + $1 WHERE id = $2',
+        [item.quantity, item.productId]
+      );
+    }
+    
+    await dbClient.query('COMMIT');
     res.json({ success: true, message: 'Venda processada com sucesso no PostgreSQL!' });
   } catch (err: any) {
-    await client.query('ROLLBACK');
+    await dbClient.query('ROLLBACK');
     res.status(400).json({ error: err.message });
   } finally {
-    client.release();
+    dbClient.release();
   }
 });
 
 // 5. Cadastrar Produto
 app.post('/api/products', async (req, res) => {
-  const { nome, preco, estoque, categoria_id } = req.body;
+  const { nome, preco, estoque, categoria_id, descricao } = req.body;
   try {
     const result = await pool.query(
-      'INSERT INTO produtos (nome, preco, estoque, categoria_id, status) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [nome, preco, estoque, categoria_id, 'Ativo']
+      'INSERT INTO produtos (nome, preco, estoque, categoria_id, status, descricao) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [nome, preco, estoque, categoria_id, 'Ativo', descricao || null]
     );
     res.json({ success: true, product: result.rows[0], message: 'Produto cadastrado com sucesso!' });
   } catch (err) {
     console.error('ERRO /api/products:', err);
     res.status(500).json({ error: 'Erro ao cadastrar produto.' });
+  }
+});
+
+// 6. Atualizar Produto (Edição)
+app.put('/api/products/:id', async (req, res) => {
+  const { id } = req.params;
+  const { preco, estoque, descricao } = req.body;
+  try {
+    const result = await pool.query(
+      'UPDATE produtos SET preco = $1, estoque = $2, descricao = $3 WHERE id = $4 RETURNING *',
+      [preco, estoque, descricao || null, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Produto não encontrado.' });
+    }
+    res.json({ success: true, product: result.rows[0], message: 'Produto atualizado com sucesso!' });
+  } catch (err) {
+    console.error('ERRO PUT /api/products:', err);
+    res.status(500).json({ error: 'Erro ao atualizar produto.' });
+  }
+});
+
+// 7. Buscar Clientes
+app.get('/api/clients', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM clientes ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('ERRO /api/clients:', err);
+    res.status(500).json({ error: 'Erro ao buscar clientes.' });
+  }
+});
+
+// 8. Cadastrar Cliente
+app.post('/api/clients', async (req, res) => {
+  const { nome, endereco, telefone, cpf } = req.body;
+  try {
+    const result = await pool.query(
+      'INSERT INTO clientes (nome, endereco, telefone, cpf) VALUES ($1, $2, $3, $4) RETURNING *',
+      [nome, endereco || null, telefone || null, cpf || null]
+    );
+    res.json({ success: true, client: result.rows[0], message: 'Cliente cadastrado com sucesso!' });
+  } catch (err) {
+    console.error('ERRO /api/clients:', err);
+    res.status(500).json({ error: 'Erro ao cadastrar cliente.' });
   }
 });
 
